@@ -1,0 +1,179 @@
+import itertools
+import math
+
+import gsd.hoomd
+import hoomd
+import numpy
+
+import matplotlib
+import h5py
+
+matplotlib.style.use('ggplot')
+import matplotlib_inline
+
+matplotlib_inline.backend_inline.set_matplotlib_formats('svg')
+
+import os
+
+fn = os.path.join(os.getcwd(), 'lattice.gsd')
+![ -e "$fn" ] && rm "$fn"
+fn = os.path.join(os.getcwd(), 'random.gsd')
+![ -e "$fn" ] && rm "$fn"
+fn = os.path.join(os.getcwd(), 'log.h5')
+![ -e "$fn" ] && rm "$fn"
+
+import io
+import warnings
+
+import fresnel
+import IPython
+import numpy
+import packaging.version
+import PIL
+
+device = fresnel.Device()
+tracer = fresnel.tracer.Path(device=device, w=1000,h=1000)
+
+FRESNEL_MIN_VERSION = packaging.version.parse('0.13.0')
+FRESNEL_MAX_VERSION = packaging.version.parse('0.14.0')
+
+
+def render(snapshot, particles=None, is_solid=None):
+    if (
+        'version' not in dir(fresnel)
+        or packaging.version.parse(fresnel.version.version) < FRESNEL_MIN_VERSION
+        or packaging.version.parse(fresnel.version.version) >= FRESNEL_MAX_VERSION
+    ):
+        warnings.warn(
+            f'Unsupported fresnel version {fresnel.version.version} - expect errors.'
+        )
+    L = snapshot.configuration.box[0]
+    scene = fresnel.Scene(device)
+
+    geometryA = fresnel.geometry.Sphere(
+        scene, N=N_particles_A, radius=121
+    )
+
+    geometryA.material.primitive_color_mix=1
+    geometryA.material = fresnel.material.Material(
+        color=fresnel.color.linear([250 / 255, 1 / 255, 120 / 255]), roughness=0.2, specular=0.5
+    )
+
+    typeid=snapshot.particles.typeid
+    geometryA.position[:] = snapshot.particles.position[0:N_particles_A]
+    
+    geometryA.outline_width = 10
+
+    geometryB = fresnel.geometry.Sphere(
+        scene, N=N_particles_B, radius=99.5
+    )
+
+    geometryB.material.primitive_color_mix=1
+    geometryB.material = fresnel.material.Material(
+        color=fresnel.color.linear([2 / 255, 252 / 255, 100 / 255]), roughness=0.2, specular=0.5
+    )
+
+    geometryB.position[:] = snapshot.particles.position[N_particles_A:N_particles_A+N_particles_B]
+    
+    geometryB.outline_width = 10
+
+    fresnel.geometry.Box(scene, [L, L, L, 0, 0, 0],box_radius=0)
+
+    scene.lights = [
+        fresnel.light.Light(direction=(1,0,0), color=(0.8, 0.8, 0.8), theta=math.pi),
+        fresnel.light.Light(
+            direction=(1, 1, 0), color=(1.1, 1.1, 1.1), theta=math.pi / 3
+        ),
+    ]
+    scene.camera = fresnel.camera.Orthographic(
+        position=(L*2, L, L*2), look_at=(0, 0, 0), up=(0,1,0), height=L *1.2 + 1
+    )
+    scene.background_alpha = 1
+    scene.background_color = (1, 1, 1)
+    return tracer.sample(scene, samples=500)
+
+def render_movie(frames, particles=None, is_solid=None):
+    if is_solid is None:
+        is_solid = [None] * len(frames)
+    a = render(frames[0], particles, is_solid[0])
+    b = a[:, :, 0:3]
+
+    im0 = PIL.Image.fromarray(b, mode='RGB').convert(
+        'P', palette=PIL.Image.Palette.ADAPTIVE
+    )
+    ims = []
+    for i, f in enumerate(frames[1:]):
+        a = render(f, particles, is_solid[i])
+        im = PIL.Image.fromarray(a[:, :, 0:3], mode='RGB')
+        im_p = im.quantize(palette=im0)
+        ims.append(im_p)
+
+    blank = numpy.ones(shape=(im.height, im.width, 3), dtype=numpy.uint8) * 255
+    im = PIL.Image.fromarray(blank, mode='RGB')
+    im_p = im.quantize(palette=im0)
+    ims.append(im_p)
+
+    f = io.BytesIO()
+    im0.save(f, 'gif', save_all=True, append_images=ims, duration=1000, loop=0)
+
+    size = len(f.getbuffer()) / 1024
+
+    if size > 3000:
+        warnings.warn(f'Large GIF: {size} KiB')
+    return IPython.display.display(IPython.display.Image(data=f.getvalue()))
+
+m = 10
+N_particles_A = 2000
+n= 10
+N_particles_B = 3600
+N_particles = N_particles_A + N_particles_B
+
+spacing = 5
+K = math.ceil(N_particles ** (1 / 3)*1000)
+L = K * spacing
+K_A = math.ceil(N_particles_A ** (1 / 3))
+K_B = math.ceil(N_particles_B ** (1 / 3))
+
+x_A = numpy.linspace(-L / 2+242, L / 2-242, K_A, endpoint=False)
+x_B = numpy.linspace(-L / 2+500, L / 2-500, K_B, endpoint=False)
+position_A = list(itertools.product(x_A, repeat=3))
+position_B = list(itertools.product(x_B, repeat=3))
+
+frame = gsd.hoomd.Frame()
+frame.particles.N = N_particles
+frame.particles.types=['A', 'B']
+frame.particles.positionA=numpy.array(position_A[0:N_particles_A])
+frame.particles.positionB=numpy.array(position_B[0:N_particles_B])
+
+frame.particles.position=numpy.concatenate(
+    (position_A[0:N_particles_A], position_B[0:N_particles_B])
+)
+
+frame.particles.typeid = numpy.concatenate((numpy.tile(0, N_particles_A), numpy.tile(1, N_particles_B)))
+frame.configuration.box = [L, L, L, 0, 0, 0]
+
+with gsd.hoomd.open(name='lattice.gsd', mode='x') as f:
+    f.append(frame)
+
+gpu = hoomd.device.GPU()
+simulation = hoomd.Simulation(device=gpu,seed=1)
+simulation.create_state_from_gsd(filename='lattice.gsd')
+
+integrator = hoomd.md.Integrator(dt=0.005)
+cell = hoomd.md.nlist.Cell(buffer=100)
+
+mie = hoomd.md.pair.Mie(nlist=cell)
+mie.params[('A', 'A')] = dict(epsilon=9, sigma=253, n=45, m=25)
+mie.r_cut[('A', 'A')] = 310
+mie.params[('A', 'B')] = dict(epsilon=8.1, sigma=230.5, n=45, m=20)
+mie.r_cut[('A', 'B')] = 280
+mie.params[('B', 'B')] = dict(epsilon=7.4, sigma=209, n=45, m=18)
+mie.r_cut[('B', 'B')] = 260
+
+integrator.forces.append(mie)
+nvt = hoomd.md.methods.ConstantVolume(
+    filter=hoomd.filter.All(), thermostat=hoomd.md.methods.thermostats.Bussi(kT=2.5)
+)
+integrator.methods.append(nvt)
+simulation.operations.integrator = integrator
+snapshot=simulation.state.get_snapshot()
