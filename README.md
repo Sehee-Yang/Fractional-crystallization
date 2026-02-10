@@ -3,6 +3,9 @@
 This repository contains all scripts used to run and analyze the molecular dynamics simulations reported in the manuscript:
 "Fractional crystallization of colloids" (Nature Communications, under revision).
 
+Each folder corresponds to an individual figure in the manuscript and includes the scripts
+required to run simulations and perform the associated analyses.
+
 ## System Requirements
 
 ### Operating System
