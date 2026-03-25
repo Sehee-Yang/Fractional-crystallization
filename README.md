@@ -16,3 +16,4 @@ required to run simulations and perform the associated analyses.
 - Python 3.9+
 - NumPy (>=1.20) 2.0.2
 - Matplotlib (>=3.5) 3.9.2
+- MATLAB R2022b
